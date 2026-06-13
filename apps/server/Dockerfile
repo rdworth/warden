@@ -13,4 +13,6 @@ FROM base AS runtime
 ENV NODE_ENV=production
 COPY --from=build /app /app
 EXPOSE 8080
-CMD ["pnpm", "--filter", "server", "start"]
+# Run node directly (not via pnpm) so SIGTERM reaches the process cleanly and
+# there's no corepack/pnpm resolution at container start.
+CMD ["node", "apps/server/dist/index.js"]
