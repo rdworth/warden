@@ -3,135 +3,192 @@ import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
-import { WebSocketServer } from "ws";
-import { runAgent, type ModelMessage } from "@warden/core";
+import { WebSocketServer, type WebSocket } from "ws";
+import {
+  DEFAULT_POLICY,
+  defaultModel,
+  newBudget,
+  runWarden,
+  screenOutgoing,
+  type ModelMessage,
+  type RunContext,
+  type SessionBudget,
+} from "@warden/core";
 import {
   parseClientEvent,
   serializeServerEvent,
+  type Decision,
   type ServerEvent,
 } from "@warden/contracts";
+import { initOtel } from "./otel.js";
+import { RoomService } from "./rooms.js";
 
 /**
- * Thin WebSocket transport over the agent harness. The WS server is attached
- * to a plain HTTP server so that:
- *   - platform health checks / browsers hitting `/` get a 200 (Railway routes
- *     HTTP to this port and probes it),
- *   - the WebSocket upgrade shares the same port.
- * No agent logic lives here — it only drives packages/core.
+ * WS transport + orchestration for the escape-room Game Master. Routes operator
+ * console / dev-control events, runs the GM harness per player utterance,
+ * round-trips risky-action approvals back to the operator, and broadcasts team
+ * messages, staff pings, observability spans, and room state to all consoles.
+ * The HTTP endpoint (`GET /`) doubles as the platform health check.
  */
 
-// Load the repo-root .env for local dev. Real environment variables (e.g. on
-// Railway) already in process.env take precedence — dotenv won't override them.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "../../../.env") });
-
 if (!process.env.ANTHROPIC_API_KEY) {
-  console.warn(
-    "[server] WARNING: ANTHROPIC_API_KEY is not set — agent runs will fail.",
-  );
+  console.warn("[server] WARNING: ANTHROPIC_API_KEY is not set — Warden runs will fail.");
 }
 
+initOtel();
+
 const PORT = Number(process.env.PORT ?? 8080);
+const rooms = new RoomService();
+
+// Per-room conversation history + budget (shared across all operator sockets).
+interface RoomRuntime {
+  history: ModelMessage[];
+  budget: SessionBudget;
+}
+const runtimes = new Map<string, RoomRuntime>();
+function runtimeFor(roomId: string): RoomRuntime {
+  let rt = runtimes.get(roomId);
+  if (!rt) {
+    rt = { history: [], budget: newBudget() };
+    runtimes.set(roomId, rt);
+  }
+  return rt;
+}
+
+// Risky-action approvals awaiting a human decision, keyed by approvalId.
+const pendingApprovals = new Map<string, (decision: Decision) => void>();
+const APPROVAL_TIMEOUT_MS = 2 * 60_000;
+
+const clients = new Set<WebSocket>();
+function broadcast(event: ServerEvent): void {
+  const payload = serializeServerEvent(event);
+  for (const socket of clients) {
+    if (socket.readyState === socket.OPEN) socket.send(payload);
+  }
+}
+
+function pushRoomState(roomId: string): void {
+  broadcast({ type: "room_state", room: rooms.view(roomId) });
+}
 
 const httpServer = createServer((_req, res) => {
   res.writeHead(200, { "content-type": "text/plain" });
-  res.end("warden agent server: ok\n");
+  res.end("warden game master: ok\n");
 });
 
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (socket) => {
-  // Per-connection conversation history and in-flight runs.
-  const history: ModelMessage[] = [];
-  const runs = new Map<string, AbortController>();
-
-  const send = (event: ServerEvent) => {
-    if (socket.readyState === socket.OPEN) {
-      socket.send(serializeServerEvent(event));
-    }
-  };
+  clients.add(socket);
+  // Bring the new console up to date.
+  for (const roomId of rooms.listRoomIds()) {
+    socket.send(serializeServerEvent({ type: "room_state", room: rooms.view(roomId) }));
+  }
 
   socket.on("message", async (data) => {
     let event;
     try {
       event = parseClientEvent(data.toString());
     } catch (err) {
-      send({
-        type: "error",
-        message: `invalid message: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      socket.send(
+        serializeServerEvent({
+          type: "error",
+          message: `invalid message: ${err instanceof Error ? err.message : String(err)}`,
+        }),
+      );
       return;
     }
 
-    if (event.type === "cancel") {
-      runs.get(event.runId)?.abort();
-      return;
-    }
-
-    // event.type === "user_message"
-    const runId = randomUUID();
-    const controller = new AbortController();
-    runs.set(runId, controller);
-    history.push({ role: "user", content: event.text });
-    send({ type: "run_started", runId });
-
-    let assistantText = "";
-    try {
-      for await (const part of runAgent({
-        messages: history,
-        abortSignal: controller.signal,
-      })) {
-        switch (part.type) {
-          case "text_delta":
-            assistantText += part.delta;
-            send({ type: "text_delta", runId, delta: part.delta });
-            break;
-          case "tool_call":
-            send({
-              type: "tool_call",
-              runId,
-              toolCallId: part.toolCallId,
-              name: part.name,
-              args: part.args,
-            });
-            break;
-          case "tool_result":
-            send({
-              type: "tool_result",
-              runId,
-              toolCallId: part.toolCallId,
-              result: part.result,
-            });
-            break;
-          case "finish":
-            send({ type: "run_finished", runId, reason: part.reason });
-            break;
-          case "error":
-            console.error(`[server] run ${runId} error:`, part.message);
-            send({ type: "error", runId, message: part.message });
-            break;
+    switch (event.type) {
+      case "operator_decision": {
+        const resolve = pendingApprovals.get(event.approvalId);
+        if (resolve) {
+          pendingApprovals.delete(event.approvalId);
+          resolve(event.decision);
         }
+        return;
       }
-      if (assistantText) {
-        history.push({ role: "assistant", content: assistantText });
+
+      case "room_control": {
+        const c = event.control;
+        if (c.action === "start") rooms.start(event.roomId);
+        else if (c.action === "solve_puzzle") rooms.solvePuzzle(event.roomId, c.puzzleId);
+        else if (c.action === "reset") {
+          rooms.reset(event.roomId);
+          runtimes.delete(event.roomId);
+        }
+        pushRoomState(event.roomId);
+        return;
       }
-    } finally {
-      runs.delete(runId);
+
+      case "player_utterance": {
+        await handleUtterance(event.roomId, event.text);
+        return;
+      }
+
+      case "cancel":
+        // No per-run cancellation in v1.
+        return;
     }
   });
 
   socket.on("close", () => {
-    for (const controller of runs.values()) controller.abort();
-    runs.clear();
+    clients.delete(socket);
   });
 });
 
+async function handleUtterance(roomId: string, text: string): Promise<void> {
+  const room = rooms.getRoom(roomId);
+  if (!room) {
+    broadcast({ type: "error", roomId, message: `unknown room: ${roomId}` });
+    return;
+  }
+
+  const rt = runtimeFor(roomId);
+  const { model, modelId } = defaultModel();
+
+  const ctx: RunContext = {
+    roomId,
+    model,
+    modelId,
+    sensors: { snapshot: () => rooms.snapshot(roomId) },
+    actions: {
+      pingStaff: (reason) => console.log(`[staff] room ${roomId}: ${reason}`),
+      skipPuzzle: (puzzleId) => rooms.skipPuzzle(roomId, puzzleId),
+      extendTimer: (minutes) => rooms.extendTimer(roomId, minutes),
+    },
+    requestApproval: (ask) =>
+      new Promise<Decision>((resolveDecision) => {
+        const approvalId = randomUUID();
+        const timer = setTimeout(() => {
+          if (pendingApprovals.delete(approvalId)) resolveDecision("deny");
+        }, APPROVAL_TIMEOUT_MS);
+        pendingApprovals.set(approvalId, (decision) => {
+          clearTimeout(timer);
+          resolveDecision(decision);
+        });
+        broadcast({
+          type: "approval_request",
+          request: { approvalId, roomId, tool: ask.tool, input: ask.input, reason: ask.reason },
+        });
+      }),
+    screen: (out) => screenOutgoing(out, rooms.unsolvedSolutions(roomId)),
+    emit: broadcast,
+    policy: DEFAULT_POLICY,
+    budget: rt.budget,
+  };
+
+  await runWarden(ctx, rt.history, text);
+  // Tools (skip_puzzle / extend_timer) may have changed room state.
+  pushRoomState(roomId);
+}
+
 httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`[server] http+ws listening on 0.0.0.0:${PORT}`);
+  console.log(`[server] http+ws (game master) listening on 0.0.0.0:${PORT}`);
 });
 
-// Graceful shutdown so SIGTERM (deploys, restarts) exits 0 instead of looking
-// like a crash. Force-exit if sockets linger past a few seconds.
 const shutdown = (signal: string) => {
   console.log(`[server] received ${signal}, shutting down`);
   for (const client of wss.clients) client.close(1001, "server shutting down");

@@ -1,97 +1,115 @@
 import { anthropic } from "@ai-sdk/anthropic";
-import { stepCountIs, streamText, tool, type ModelMessage } from "ai";
-import { z } from "zod";
+import {
+  stepCountIs,
+  streamText,
+  type LanguageModel,
+  type ModelMessage,
+} from "ai";
+import { GM_SYSTEM_PROMPT } from "./gm-prompt.js";
+import { wrapPlayerUtterance } from "./guardrails.js";
+import { costUsd, startSpan } from "./telemetry.js";
+import { makeTools } from "./tools.js";
+import type { RunContext } from "./types.js";
 
 /**
- * The agent harness. This module knows nothing about WebSockets, HTTP, or
- * Next.js — it just turns a conversation into an async stream of harness
- * events. That keeps it unit-testable and lets you drive it from a CLI, a
- * test, or the WS server in apps/server without changes.
+ * The Game Master harness. Transport-agnostic and push-based: it drives the
+ * model + gated tools for one player utterance and emits events through
+ * ctx.emit (team messages, approvals, staff pings, observability spans). The
+ * server backs ctx with the real room service + WS; tests back it with fakes.
  */
 
+export * from "./types.js";
+export { GM_SYSTEM_PROMPT } from "./gm-prompt.js";
+export { screenOutgoing, wrapPlayerUtterance } from "./guardrails.js";
+export { costUsd } from "./telemetry.js";
+export { runTool } from "./policy.js";
 export type { ModelMessage } from "ai";
 
-export type HarnessEvent =
-  | { type: "text_delta"; delta: string }
-  | { type: "tool_call"; toolCallId: string; name: string; args: unknown }
-  | { type: "tool_result"; toolCallId: string; result: unknown }
-  | { type: "finish"; reason: string }
-  | { type: "error"; message: string };
+export const DEFAULT_MODEL = "claude-opus-4-8";
 
-export interface RunAgentOptions {
-  messages: ModelMessage[];
-  /** Defaults to MODEL env var, then claude-opus-4-8. */
-  model?: string;
-  system?: string;
-  /** Abort the run mid-flight (wired to the `cancel` client event). */
-  abortSignal?: AbortSignal;
+/** The default production model + its id (for cost lookup). */
+export function defaultModel(): { model: LanguageModel; modelId: string } {
+  const modelId = process.env.MODEL ?? DEFAULT_MODEL;
+  return { model: anthropic(modelId), modelId };
 }
 
-const DEFAULT_MODEL = "claude-opus-4-8";
+export async function runWarden(
+  ctx: RunContext,
+  history: ModelMessage[],
+  utterance: string,
+): Promise<void> {
+  // INPUT guardrail: frame player speech as untrusted data.
+  history.push({ role: "user", content: wrapPlayerUtterance(utterance) });
 
-/**
- * Example tool. Promote real actions to dedicated tools like this so the
- * harness can gate / render / audit them — see the README for guidance.
- */
-const tools = {
-  getCurrentTime: tool({
-    description: "Get the current date and time as an ISO 8601 string.",
-    inputSchema: z.object({}),
-    execute: async () => new Date().toISOString(),
-  }),
-};
+  // ACTION/COST budget — enforced in code before spending tokens.
+  if (
+    ctx.budget.responseCount >= ctx.policy.maxResponses ||
+    ctx.budget.cumulativeCostUsd >= ctx.policy.maxCostUsd
+  ) {
+    ctx.emit({
+      type: "staff_ping",
+      roomId: ctx.roomId,
+      reason: "Warden reached its per-session response/cost budget",
+    });
+    ctx.emit({
+      type: "team_message",
+      roomId: ctx.roomId,
+      text: "Hang tight — I'm looping in the staff so you get the help you need.",
+    });
+    return;
+  }
 
-export async function* runAgent(
-  opts: RunAgentOptions,
-): AsyncGenerator<HarnessEvent> {
-  const model = opts.model ?? process.env.MODEL ?? DEFAULT_MODEL;
-
+  const span = startSpan(ctx.roomId, "warden.generate", "model");
   try {
     const result = streamText({
-      model: anthropic(model),
-      system: opts.system ?? "You are a helpful agent.",
-      messages: opts.messages,
-      tools,
-      // Allow the model to call a tool, see the result, and keep going.
-      stopWhen: stepCountIs(5),
-      abortSignal: opts.abortSignal,
+      model: ctx.model,
+      system: GM_SYSTEM_PROMPT,
+      messages: history,
+      tools: makeTools(ctx),
+      stopWhen: stepCountIs(6),
+      experimental_telemetry: { isEnabled: true, functionId: "warden-gm" },
     });
 
-    for await (const part of result.fullStream) {
-      switch (part.type) {
-        case "text-delta":
-          yield { type: "text_delta", delta: part.text };
-          break;
-        case "tool-call":
-          yield {
-            type: "tool_call",
-            toolCallId: part.toolCallId,
-            name: part.toolName,
-            args: part.input,
-          };
-          break;
-        case "tool-result":
-          yield {
-            type: "tool_result",
-            toolCallId: part.toolCallId,
-            result: part.output,
-          };
-          break;
-        case "finish":
-          yield { type: "finish", reason: part.finishReason };
-          break;
-        case "error":
-          yield { type: "error", message: String(part.error) };
-          break;
-        default:
-          // text-start/-end, reasoning, tool-input deltas, step markers, etc.
-          break;
-      }
+    const finalText = (await result.text).trim();
+    const usage = await result.usage;
+    const tokensIn = usage.inputTokens ?? undefined;
+    const tokensOut = usage.outputTokens ?? undefined;
+    const cost = costUsd(ctx.modelId, tokensIn ?? 0, tokensOut ?? 0);
+    ctx.emit({
+      type: "observability",
+      span: span.end({ tokensIn, tokensOut, costUsd: cost }),
+    });
+    if (cost) ctx.budget.cumulativeCostUsd += cost;
+
+    // OUTPUT guardrail: never leak an unsolved puzzle's solution.
+    const screened = ctx.screen(finalText);
+    if (screened.leaked) {
+      const g = startSpan(ctx.roomId, "guardrail.output", "guardrail");
+      ctx.emit({ type: "observability", span: g.end({ status: "denied" }) });
+      ctx.emit({
+        type: "staff_ping",
+        roomId: ctx.roomId,
+        reason: "Output guardrail redacted a potential solution leak",
+      });
     }
+
+    const text =
+      screened.text || "Let me take a quick look and get right back to you.";
+    ctx.emit({ type: "team_message", roomId: ctx.roomId, text });
+    history.push({ role: "assistant", content: finalText });
+    ctx.budget.responseCount += 1;
+    ctx.budget.lastResponseAt = Date.now();
   } catch (err) {
-    yield {
-      type: "error",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.emit({
+      type: "observability",
+      span: span.end({ status: "error", error: message }),
+    });
+    ctx.emit({
+      type: "staff_ping",
+      roomId: ctx.roomId,
+      reason: `Warden error: ${message}`,
+    });
+    ctx.emit({ type: "error", roomId: ctx.roomId, message });
   }
 }

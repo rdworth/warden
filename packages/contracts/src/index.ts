@@ -1,44 +1,66 @@
 import { z } from "zod";
+import {
+  ApprovalRequest,
+  Decision,
+  RoomView,
+  SpanRecord,
+} from "./domain.js";
+
+export * from "./domain.js";
 
 /**
  * The single source of truth for everything that crosses the WebSocket, in
- * both directions. Both `apps/web` (client) and `apps/server` (server) import
+ * both directions. Both apps/web (operator console) and apps/server import
  * these schemas, so the wire format is validated at runtime AND type-checked
  * at compile time on both ends.
  */
 
 // ---------------------------------------------------------------------------
-// Client -> Server
+// Client (operator console / dev controls) -> Server
 // ---------------------------------------------------------------------------
 
+/** Dev/sim control actions that drive the in-memory room service. */
+export const RoomControl = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("start") }),
+  z.object({ action: z.literal("solve_puzzle"), puzzleId: z.string() }),
+  z.object({ action: z.literal("reset") }),
+]);
+export type RoomControl = z.infer<typeof RoomControl>;
+
 export const ClientEvent = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("user_message"), text: z.string().min(1) }),
+  // A (transcribed) player line — "Hey Warden, can we have a hint?". Real
+  // mic/STT is a pluggable adapter; here it arrives as text.
+  z.object({ type: z.literal("player_utterance"), roomId: z.string(), text: z.string().min(1) }),
+  // A human GM's response to an approval_request.
+  z.object({
+    type: z.literal("operator_decision"),
+    approvalId: z.string(),
+    decision: Decision,
+    note: z.string().optional(),
+  }),
+  // Drive the simulated room (start, mark a puzzle solved, reset).
+  z.object({ type: z.literal("room_control"), roomId: z.string(), control: RoomControl }),
+  // Cancel an in-flight Warden run.
   z.object({ type: z.literal("cancel"), runId: z.string() }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 
 // ---------------------------------------------------------------------------
-// Server -> Client
+// Server -> Client (operator console)
 // ---------------------------------------------------------------------------
 
 export const ServerEvent = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("run_started"), runId: z.string() }),
-  z.object({ type: z.literal("text_delta"), runId: z.string(), delta: z.string() }),
-  z.object({
-    type: z.literal("tool_call"),
-    runId: z.string(),
-    toolCallId: z.string(),
-    name: z.string(),
-    args: z.unknown(),
-  }),
-  z.object({
-    type: z.literal("tool_result"),
-    runId: z.string(),
-    toolCallId: z.string(),
-    result: z.unknown(),
-  }),
-  z.object({ type: z.literal("run_finished"), runId: z.string(), reason: z.string() }),
-  z.object({ type: z.literal("error"), runId: z.string().optional(), message: z.string() }),
+  // Warden's player-facing output, AFTER the output guardrail has screened it.
+  z.object({ type: z.literal("team_message"), roomId: z.string(), text: z.string() }),
+  // A risky action (skip_puzzle / extend_timer) awaiting a human decision.
+  z.object({ type: z.literal("approval_request"), request: ApprovalRequest }),
+  // Notify staff — on player request or on error/budget breach.
+  z.object({ type: z.literal("staff_ping"), roomId: z.string(), reason: z.string() }),
+  // One OpenTelemetry span, for the live observability panel.
+  z.object({ type: z.literal("observability"), span: SpanRecord }),
+  // Pushed room state (operator-safe projection).
+  z.object({ type: z.literal("room_state"), room: RoomView }),
+  z.object({ type: z.literal("error"), roomId: z.string().optional(), message: z.string() }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 
