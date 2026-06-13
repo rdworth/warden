@@ -19,7 +19,7 @@ function fmt(ms: number): string {
 }
 
 export default function Console() {
-  const { connected, rooms, teamMessages, approvals, spans, pings, sendUtterance, decide, roomControl } =
+  const { connected, rooms, teamMessages, approvals, spans, pings, budgets, sendUtterance, decide, roomControl, topUpBudget, acknowledgePing } =
     useWardenSocket();
   const [input, setInput] = useState("");
   const [now, setNow] = useState(Date.now());
@@ -31,6 +31,7 @@ export default function Console() {
 
   const room = rooms[ROOM_ID];
   const messages = teamMessages[ROOM_ID] ?? [];
+  const budget = budgets[ROOM_ID];
 
   const elapsed = room?.startedAt ? now - room.startedAt : 0;
 
@@ -108,15 +109,30 @@ export default function Console() {
               </div>
             </Panel>
 
-            <Panel title="Team channel (what Warden says to players)">
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+            <Panel title="Room channel (players ↔ Warden)">
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 240, overflowY: "auto" }}>
                 {messages.length === 0 && <span style={{ color: "#999", fontSize: 13 }}>No messages yet.</span>}
-                {messages.map((m, i) => (
-                  <div key={i} style={{ background: "#eef3ff", padding: "6px 10px", borderRadius: 10 }}>
-                    <span style={{ fontSize: 11, color: "#88a" }}>Warden</span>
-                    <div>{m.text}</div>
-                  </div>
-                ))}
+                {messages.map((m, i) => {
+                  const isPlayer = m.role === "player";
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        alignSelf: isPlayer ? "flex-end" : "flex-start",
+                        maxWidth: "85%",
+                        background: isPlayer ? "#1a1a1a" : "#eef3ff",
+                        color: isPlayer ? "white" : "#111",
+                        padding: "6px 10px",
+                        borderRadius: 10,
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: isPlayer ? "#bbb" : "#88a" }}>
+                        {isPlayer ? "Players" : "Warden"}
+                      </span>
+                      <div>{m.text}</div>
+                    </div>
+                  );
+                })}
               </div>
               <form
                 onSubmit={(e) => {
@@ -174,6 +190,35 @@ export default function Console() {
               )}
             </Panel>
 
+            <Panel title="Budget">
+              {!budget ? (
+                <span style={{ color: "#999", fontSize: 13 }}>—</span>
+              ) : (
+                <>
+                  <Bar
+                    label="responses"
+                    used={budget.responsesUsed}
+                    limit={budget.responsesLimit}
+                    text={`${budget.responsesUsed} / ${budget.responsesLimit}`}
+                  />
+                  <Bar
+                    label="cost"
+                    used={budget.costUsd}
+                    limit={budget.costLimit}
+                    text={`$${budget.costUsd.toFixed(4)} / $${budget.costLimit.toFixed(2)}`}
+                  />
+                  <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                    <button onClick={() => topUpBudget(ROOM_ID, { responses: 10 })} style={btnGhost}>
+                      +10 responses
+                    </button>
+                    <button onClick={() => topUpBudget(ROOM_ID, { costUsd: 0.5 })} style={btnGhost}>
+                      +$0.50
+                    </button>
+                  </div>
+                </>
+              )}
+            </Panel>
+
             <Panel title="Observability">
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 8, fontSize: 13 }}>
                 <Metric label="model calls" value={String(metrics.calls)} />
@@ -196,13 +241,33 @@ export default function Console() {
               </div>
             </Panel>
 
-            <Panel title="Staff pings">
+            <Panel title={`Staff pings${pings.some((p) => !p.resolved) ? ` (${pings.filter((p) => !p.resolved).length})` : ""}`}>
               {pings.length === 0 ? (
                 <span style={{ color: "#999", fontSize: 13 }}>None.</span>
               ) : (
-                <div style={{ display: "grid", gap: 3, fontSize: 13 }}>
-                  {pings.map((p, i) => (
-                    <div key={i}>🔔 {p.reason}</div>
+                <div style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                  {pings.map((p) => (
+                    <div
+                      key={p.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 8,
+                        opacity: p.resolved ? 0.5 : 1,
+                      }}
+                    >
+                      <span style={{ textDecoration: p.resolved ? "line-through" : "none" }}>
+                        {p.resolved ? "✅" : "🔔"} {p.reason}
+                      </span>
+                      {p.resolved ? (
+                        <span style={{ fontSize: 11, color: "#0a7", whiteSpace: "nowrap" }}>answered</span>
+                      ) : (
+                        <button onClick={() => acknowledgePing(p.id)} style={btnGhost}>
+                          Answered
+                        </button>
+                      )}
+                    </div>
                   ))}
                 </div>
               )}
@@ -219,6 +284,22 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
     <div style={{ border: "1px solid #e3e3e3", borderRadius: 10, padding: 12, marginBottom: 14 }}>
       <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, color: "#888", margin: "0 0 8px" }}>{title}</h2>
       {children}
+    </div>
+  );
+}
+
+function Bar({ label, used, limit, text }: { label: string; used: number; limit: number; text: string }) {
+  const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+  const color = pct >= 100 ? "#e74c3c" : pct >= 80 ? "#e67e22" : "#0a7";
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#555" }}>
+        <span>{label}</span>
+        <span>{text}</span>
+      </div>
+      <div style={{ height: 6, background: "#eee", borderRadius: 4, overflow: "hidden", marginTop: 3 }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+      </div>
     </div>
   );
 }

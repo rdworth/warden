@@ -1,12 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { anthropic } from "@ai-sdk/anthropic";
 import {
+  generateText,
   stepCountIs,
   streamText,
   type LanguageModel,
   type ModelMessage,
 } from "ai";
-import { GM_SYSTEM_PROMPT } from "./gm-prompt.js";
-import { wrapPlayerUtterance } from "./guardrails.js";
+import { CANNED_DEFLECTIONS, DEFLECTION_PROMPT, GM_SYSTEM_PROMPT } from "./gm-prompt.js";
+import { detectManipulation, screenOutgoing, wrapPlayerUtterance } from "./guardrails.js";
 import { costUsd, startSpan } from "./telemetry.js";
 import { makeTools } from "./tools.js";
 import type { RunContext } from "./types.js";
@@ -20,7 +22,7 @@ import type { RunContext } from "./types.js";
 
 export * from "./types.js";
 export { GM_SYSTEM_PROMPT } from "./gm-prompt.js";
-export { screenOutgoing, wrapPlayerUtterance } from "./guardrails.js";
+export { detectManipulation, screenOutgoing, wrapPlayerUtterance } from "./guardrails.js";
 export { costUsd } from "./telemetry.js";
 export { runTool } from "./policy.js";
 export type { ModelMessage } from "ai";
@@ -41,6 +43,14 @@ export async function runWarden(
   // INPUT guardrail: frame player speech as untrusted data.
   history.push({ role: "user", content: wrapPlayerUtterance(utterance) });
 
+  // CHEAT/OVERRIDE guardrail (in code, not prompt): if the players are trying to
+  // extract the answer or override the rules, deflect in-character WITHOUT ever
+  // giving a hint — guaranteed by running with no room context and screening.
+  if (detectManipulation(utterance)) {
+    await runDeflection(ctx, history, utterance);
+    return;
+  }
+
   // ACTION/COST budget — enforced in code before spending tokens.
   if (
     ctx.budget.responseCount >= ctx.policy.maxResponses ||
@@ -48,6 +58,7 @@ export async function runWarden(
   ) {
     ctx.emit({
       type: "staff_ping",
+      id: randomUUID(),
       roomId: ctx.roomId,
       reason: "Warden reached its per-session response/cost budget",
     });
@@ -88,6 +99,7 @@ export async function runWarden(
       ctx.emit({ type: "observability", span: g.end({ status: "denied" }) });
       ctx.emit({
         type: "staff_ping",
+        id: randomUUID(),
         roomId: ctx.roomId,
         reason: "Output guardrail redacted a potential solution leak",
       });
@@ -107,9 +119,63 @@ export async function runWarden(
     });
     ctx.emit({
       type: "staff_ping",
+      id: randomUUID(),
       roomId: ctx.roomId,
       reason: `Warden error: ${message}`,
     });
     ctx.emit({ type: "error", roomId: ctx.roomId, message });
   }
+}
+
+function cannedDeflection(): string {
+  return CANNED_DEFLECTIONS[Math.floor(Math.random() * CANNED_DEFLECTIONS.length)];
+}
+
+/**
+ * Deflection path for detected cheat/override attempts. The model runs with no
+ * room context and no tools, so it has nothing to leak; the output is then
+ * screened against unsolved solutions AND hints, falling back to a canned
+ * in-character line if anything slips through. Guaranteed: no hint, no answer.
+ */
+async function runDeflection(
+  ctx: RunContext,
+  history: ModelMessage[],
+  utterance: string,
+): Promise<void> {
+  const span = startSpan(ctx.roomId, "warden.deflect", "model");
+  let text: string;
+  try {
+    const result = await generateText({
+      model: ctx.model,
+      system: DEFLECTION_PROMPT,
+      // No history, no tools, no room state — nothing to leak.
+      messages: [{ role: "user", content: wrapPlayerUtterance(utterance) }],
+    });
+    const tokensIn = result.usage.inputTokens ?? undefined;
+    const tokensOut = result.usage.outputTokens ?? undefined;
+    const cost = costUsd(ctx.modelId, tokensIn ?? 0, tokensOut ?? 0);
+    ctx.emit({ type: "observability", span: span.end({ tokensIn, tokensOut, costUsd: cost }) });
+    if (cost) ctx.budget.cumulativeCostUsd += cost;
+
+    // Backstop: screen against solutions (ctx.screen) AND unsolved hints.
+    const hints = ctx.sensors.snapshot().puzzles.flatMap((p) => p.hints);
+    const afterSolutions = ctx.screen(result.text.trim());
+    const afterHints = screenOutgoing(afterSolutions.text, hints);
+    text = afterSolutions.leaked || afterHints.leaked ? cannedDeflection() : afterHints.text;
+    if (afterSolutions.leaked || afterHints.leaked) {
+      ctx.emit({
+        type: "observability",
+        span: startSpan(ctx.roomId, "guardrail.deflect", "guardrail").end({ status: "denied" }),
+      });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.emit({ type: "observability", span: span.end({ status: "error", error: message }) });
+    text = cannedDeflection();
+  }
+
+  ctx.emit({ type: "team_message", roomId: ctx.roomId, text });
+  history.push({ role: "assistant", content: text });
+  ctx.budget.responseCount += 1;
+  ctx.budget.lastResponseAt = Date.now();
 }

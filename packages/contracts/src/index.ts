@@ -40,6 +40,15 @@ export const ClientEvent = z.discriminatedUnion("type", [
   }),
   // Drive the simulated room (start, mark a puzzle solved, reset).
   z.object({ type: z.literal("room_control"), roomId: z.string(), control: RoomControl }),
+  // Operator raises the per-session response / cost budget (top-up).
+  z.object({
+    type: z.literal("budget_topup"),
+    roomId: z.string(),
+    responses: z.number().optional(),
+    costUsd: z.number().optional(),
+  }),
+  // Staff mark a "talk to a human" ping (or any alert) as handled.
+  z.object({ type: z.literal("staff_ack"), pingId: z.string() }),
   // Cancel an in-flight Warden run.
   z.object({ type: z.literal("cancel"), runId: z.string() }),
 ]);
@@ -50,16 +59,29 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 // ---------------------------------------------------------------------------
 
 export const ServerEvent = z.discriminatedUnion("type", [
+  // What the players said out loud (echoed to all consoles so operators see it).
+  z.object({ type: z.literal("player_message"), roomId: z.string(), text: z.string() }),
   // Warden's player-facing output, AFTER the output guardrail has screened it.
   z.object({ type: z.literal("team_message"), roomId: z.string(), text: z.string() }),
   // A risky action (skip_puzzle / extend_timer) awaiting a human decision.
   z.object({ type: z.literal("approval_request"), request: ApprovalRequest }),
   // Notify staff — on player request or on error/budget breach.
-  z.object({ type: z.literal("staff_ping"), roomId: z.string(), reason: z.string() }),
+  z.object({ type: z.literal("staff_ping"), id: z.string(), roomId: z.string(), reason: z.string() }),
+  // A staff ping was acknowledged (handled) — broadcast so every console clears it.
+  z.object({ type: z.literal("staff_ack"), pingId: z.string() }),
   // One OpenTelemetry span, for the live observability panel.
   z.object({ type: z.literal("observability"), span: SpanRecord }),
   // Pushed room state (operator-safe projection).
   z.object({ type: z.literal("room_state"), room: RoomView }),
+  // Per-session budget usage + limits, for the operator to see and top up.
+  z.object({
+    type: z.literal("budget"),
+    roomId: z.string(),
+    responsesUsed: z.number(),
+    responsesLimit: z.number(),
+    costUsd: z.number(),
+    costLimit: z.number(),
+  }),
   z.object({ type: z.literal("error"), roomId: z.string().optional(), message: z.string() }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;

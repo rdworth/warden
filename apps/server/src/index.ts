@@ -11,6 +11,7 @@ import {
   runWarden,
   screenOutgoing,
   type ModelMessage,
+  type PolicyConfig,
   type RunContext,
   type SessionBudget,
 } from "@warden/core";
@@ -42,19 +43,42 @@ initOtel();
 const PORT = Number(process.env.PORT ?? 8080);
 const rooms = new RoomService();
 
-// Per-room conversation history + budget (shared across all operator sockets).
+// Per-session budget limits — defaults are env-overridable; operators can also
+// top them up live.
+function initialPolicy(): PolicyConfig {
+  return {
+    ...DEFAULT_POLICY,
+    maxResponses: Number(process.env.WARDEN_MAX_RESPONSES ?? DEFAULT_POLICY.maxResponses),
+    maxCostUsd: Number(process.env.WARDEN_MAX_COST_USD ?? DEFAULT_POLICY.maxCostUsd),
+  };
+}
+
+// Per-room conversation history + budget + policy (shared across all sockets).
 interface RoomRuntime {
   history: ModelMessage[];
   budget: SessionBudget;
+  policy: PolicyConfig;
 }
 const runtimes = new Map<string, RoomRuntime>();
 function runtimeFor(roomId: string): RoomRuntime {
   let rt = runtimes.get(roomId);
   if (!rt) {
-    rt = { history: [], budget: newBudget() };
+    rt = { history: [], budget: newBudget(), policy: initialPolicy() };
     runtimes.set(roomId, rt);
   }
   return rt;
+}
+
+function pushBudget(roomId: string): void {
+  const rt = runtimeFor(roomId);
+  broadcast({
+    type: "budget",
+    roomId,
+    responsesUsed: rt.budget.responseCount,
+    responsesLimit: rt.policy.maxResponses,
+    costUsd: rt.budget.cumulativeCostUsd,
+    costLimit: rt.policy.maxCostUsd,
+  });
 }
 
 // Risky-action approvals awaiting a human decision, keyed by approvalId.
@@ -85,6 +109,17 @@ wss.on("connection", (socket) => {
   // Bring the new console up to date.
   for (const roomId of rooms.listRoomIds()) {
     socket.send(serializeServerEvent({ type: "room_state", room: rooms.view(roomId) }));
+    const rt = runtimeFor(roomId);
+    socket.send(
+      serializeServerEvent({
+        type: "budget",
+        roomId,
+        responsesUsed: rt.budget.responseCount,
+        responsesLimit: rt.policy.maxResponses,
+        costUsd: rt.budget.cumulativeCostUsd,
+        costLimit: rt.policy.maxCostUsd,
+      }),
+    );
   }
 
   socket.on("message", async (data) => {
@@ -120,6 +155,21 @@ wss.on("connection", (socket) => {
           runtimes.delete(event.roomId);
         }
         pushRoomState(event.roomId);
+        pushBudget(event.roomId);
+        return;
+      }
+
+      case "budget_topup": {
+        const rt = runtimeFor(event.roomId);
+        if (event.responses) rt.policy.maxResponses += event.responses;
+        if (event.costUsd) rt.policy.maxCostUsd += event.costUsd;
+        pushBudget(event.roomId);
+        return;
+      }
+
+      case "staff_ack": {
+        // Relay to every console so the ping clears for all operators.
+        broadcast({ type: "staff_ack", pingId: event.pingId });
         return;
       }
 
@@ -145,6 +195,9 @@ async function handleUtterance(roomId: string, text: string): Promise<void> {
     broadcast({ type: "error", roomId, message: `unknown room: ${roomId}` });
     return;
   }
+
+  // Echo the room transcript to every console before Warden responds.
+  broadcast({ type: "player_message", roomId, text });
 
   const rt = runtimeFor(roomId);
   const { model, modelId } = defaultModel();
@@ -176,13 +229,14 @@ async function handleUtterance(roomId: string, text: string): Promise<void> {
       }),
     screen: (out) => screenOutgoing(out, rooms.unsolvedSolutions(roomId)),
     emit: broadcast,
-    policy: DEFAULT_POLICY,
+    policy: rt.policy,
     budget: rt.budget,
   };
 
   await runWarden(ctx, rt.history, text);
   // Tools (skip_puzzle / extend_timer) may have changed room state.
   pushRoomState(roomId);
+  pushBudget(roomId);
 }
 
 httpServer.listen(PORT, "0.0.0.0", () => {

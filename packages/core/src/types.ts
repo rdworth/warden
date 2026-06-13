@@ -41,8 +41,8 @@ export interface PolicyConfig {
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
-  maxResponses: 8,
-  maxCostUsd: 0.5,
+  maxResponses: 20,
+  maxCostUsd: 1.0,
   minResponseGapMs: 15_000,
   pingCooldownMs: 30_000,
 };

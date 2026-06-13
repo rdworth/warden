@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { startSpan } from "./telemetry.js";
 import type { RunContext } from "./types.js";
 
@@ -90,7 +91,7 @@ function execute(
     case "ping_staff": {
       const reason = String(input.reason ?? "players requested a staff member");
       ctx.actions.pingStaff(reason);
-      ctx.emit({ type: "staff_ping", roomId: ctx.roomId, reason });
+      ctx.emit({ type: "staff_ping", id: randomUUID(), roomId: ctx.roomId, reason });
       return "Staff have been notified and are on their way.";
     }
     case "skip_puzzle": {

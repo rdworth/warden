@@ -5,6 +5,30 @@
  * can exercise them deterministically.
  */
 
+/**
+ * Heuristic detector for cheat / rule-override attempts — the cases where
+ * Warden must NOT respond with a hint. Deliberately does NOT fire on legitimate
+ * help requests ("can we have a hint?", "how are we doing?", "can you skip
+ * this?"). Detection routes to the deflection code path; it is not the security
+ * boundary itself (the action gate + output guardrail are).
+ */
+const MANIPULATION_PATTERNS: RegExp[] = [
+  /ignore\s+(your|the|all)\s+(rules|instructions|prompt|guidelines)/i,
+  /forget\s+(your|the|all)\s+(rules|instructions)/i,
+  /(you('?re| are)|we('?re| are))\s+(now\s+)?allowed/i,
+  /(admin|developer|debug|god|cheat)\s*mode/i,
+  /\boverride\b|\bbypass\b|\bjailbreak\b/i,
+  /open\s+the\s+door/i,
+  /reveal\s+(the|your|its)\s+(answer|solution|code|secret)/i,
+  /(just\s+)?(tell|give)\s+(us|me|them|her|him)\s+the\s+(answer|solution|code|password)/i,
+  /what(?:'?s| is)\s+the\s+(answer|solution|code|password)/i,
+  /the\s+(answer|solution|code|password)\s+(to|for|is)\b/i,
+];
+
+export function detectManipulation(text: string): boolean {
+  return MANIPULATION_PATTERNS.some((re) => re.test(text));
+}
+
 export function wrapPlayerUtterance(text: string): string {
   const safe = text.replace(/"""/g, '\\"\\"\\"');
   return [

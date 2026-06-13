@@ -13,13 +13,22 @@ import {
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 
 export interface TeamMessage {
+  role: "player" | "warden";
   text: string;
   ts: number;
 }
 export interface StaffPing {
+  id: string;
   roomId: string;
   reason: string;
   ts: number;
+  resolved: boolean;
+}
+export interface BudgetView {
+  responsesUsed: number;
+  responsesLimit: number;
+  costUsd: number;
+  costLimit: number;
 }
 
 /**
@@ -35,6 +44,7 @@ export function useWardenSocket() {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [spans, setSpans] = useState<SpanRecord[]>([]);
   const [pings, setPings] = useState<StaffPing[]>([]);
+  const [budgets, setBudgets] = useState<Record<string, BudgetView>>({});
 
   useEffect(() => {
     const socket = new WebSocket(WS_URL);
@@ -49,10 +59,27 @@ export function useWardenSocket() {
         case "room_state":
           setRooms((r) => ({ ...r, [ev.room.id]: ev.room }));
           break;
+        case "budget":
+          setBudgets((b) => ({
+            ...b,
+            [ev.roomId]: {
+              responsesUsed: ev.responsesUsed,
+              responsesLimit: ev.responsesLimit,
+              costUsd: ev.costUsd,
+              costLimit: ev.costLimit,
+            },
+          }));
+          break;
+        case "player_message":
+          setTeamMessages((m) => ({
+            ...m,
+            [ev.roomId]: [...(m[ev.roomId] ?? []), { role: "player", text: ev.text, ts: Date.now() }],
+          }));
+          break;
         case "team_message":
           setTeamMessages((m) => ({
             ...m,
-            [ev.roomId]: [...(m[ev.roomId] ?? []), { text: ev.text, ts: Date.now() }],
+            [ev.roomId]: [...(m[ev.roomId] ?? []), { role: "warden", text: ev.text, ts: Date.now() }],
           }));
           break;
         case "approval_request":
@@ -62,10 +89,13 @@ export function useWardenSocket() {
           setSpans((s) => [ev.span, ...s].slice(0, 100));
           break;
         case "staff_ping":
-          setPings((p) => [{ roomId: ev.roomId, reason: ev.reason, ts: Date.now() }, ...p].slice(0, 50));
+          setPings((p) => [{ id: ev.id, roomId: ev.roomId, reason: ev.reason, ts: Date.now(), resolved: false }, ...p].slice(0, 50));
+          break;
+        case "staff_ack":
+          setPings((p) => p.map((x) => (x.id === ev.pingId ? { ...x, resolved: true } : x)));
           break;
         case "error":
-          setPings((p) => [{ roomId: ev.roomId ?? "?", reason: `error: ${ev.message}`, ts: Date.now() }, ...p].slice(0, 50));
+          setPings((p) => [{ id: `err-${Date.now()}`, roomId: ev.roomId ?? "?", reason: `error: ${ev.message}`, ts: Date.now(), resolved: false }, ...p].slice(0, 50));
           break;
       }
     };
@@ -92,6 +122,28 @@ export function useWardenSocket() {
     (roomId: string, control: RoomControl) => send({ type: "room_control", roomId, control }),
     [send],
   );
+  const topUpBudget = useCallback(
+    (roomId: string, amount: { responses?: number; costUsd?: number }) =>
+      send({ type: "budget_topup", roomId, ...amount }),
+    [send],
+  );
+  const acknowledgePing = useCallback(
+    (pingId: string) => send({ type: "staff_ack", pingId }),
+    [send],
+  );
 
-  return { connected, rooms, teamMessages, approvals, spans, pings, sendUtterance, decide, roomControl };
+  return {
+    connected,
+    rooms,
+    teamMessages,
+    approvals,
+    spans,
+    pings,
+    budgets,
+    sendUtterance,
+    decide,
+    roomControl,
+    topUpBudget,
+    acknowledgePing,
+  };
 }
