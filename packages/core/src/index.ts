@@ -60,7 +60,9 @@ export async function runWarden(
       type: "staff_ping",
       id: randomUUID(),
       roomId: ctx.roomId,
+      kind: "budget",
       reason: "Warden reached its per-session response/cost budget",
+      count: 1,
     });
     ctx.emit({
       type: "team_message",
@@ -101,7 +103,9 @@ export async function runWarden(
         type: "staff_ping",
         id: randomUUID(),
         roomId: ctx.roomId,
+        kind: "guardrail",
         reason: "Output guardrail redacted a potential solution leak",
+        count: 1,
       });
     }
 
@@ -121,7 +125,9 @@ export async function runWarden(
       type: "staff_ping",
       id: randomUUID(),
       roomId: ctx.roomId,
+      kind: "error",
       reason: `Warden error: ${message}`,
+      count: 1,
     });
     ctx.emit({ type: "error", roomId: ctx.roomId, message });
   }

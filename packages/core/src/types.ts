@@ -36,22 +36,18 @@ export interface PolicyConfig {
   maxCostUsd: number;
   /** Soft minimum gap between responses (tracked; informational in v1). */
   minResponseGapMs: number;
-  /** Cooldown between staff pings. */
-  pingCooldownMs: number;
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
   maxResponses: 20,
   maxCostUsd: 1.0,
   minResponseGapMs: 15_000,
-  pingCooldownMs: 30_000,
 };
 
 export interface SessionBudget {
   responseCount: number;
   cumulativeCostUsd: number;
   lastResponseAt: number;
-  lastPingAt: number;
 }
 
 export function newBudget(): SessionBudget {
@@ -59,7 +55,6 @@ export function newBudget(): SessionBudget {
     responseCount: 0,
     cumulativeCostUsd: 0,
     lastResponseAt: 0,
-    lastPingAt: 0,
   };
 }
 

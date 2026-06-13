@@ -121,17 +121,17 @@ describe("action gate", () => {
     expect(result).toMatch(/0\/3 puzzles solved/);
   });
 
-  it("enforces the staff-ping cooldown", async () => {
+  it("emits a human_request staff ping when summoning staff", async () => {
     const room = makeRoom();
     const events: ServerEvent[] = [];
     const ctx = makeCtx(room, { events });
 
-    const first = await runTool(ctx, "ping_staff", { reason: "player asked for a person" });
-    const second = await runTool(ctx, "ping_staff", { reason: "again" });
+    const result = await runTool(ctx, "ping_staff", { reason: "player asked for a person" });
 
-    expect(first).toMatch(/notified/);
-    expect(second).toMatch(/recently/);
-    expect(events.filter((e) => e.type === "staff_ping")).toHaveLength(1);
+    expect(result).toMatch(/notified/);
+    const pings = events.filter((e) => e.type === "staff_ping");
+    expect(pings).toHaveLength(1);
+    expect(pings[0].type === "staff_ping" && pings[0].kind).toBe("human_request");
   });
 });
 

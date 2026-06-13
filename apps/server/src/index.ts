@@ -20,6 +20,7 @@ import {
   serializeServerEvent,
   type Decision,
   type ServerEvent,
+  type StaffPingKind,
 } from "@warden/contracts";
 import { initOtel } from "./otel.js";
 import { RoomService } from "./rooms.js";
@@ -93,6 +94,37 @@ function broadcast(event: ServerEvent): void {
   }
 }
 
+// Open (unacknowledged) staff pings, deduplicated per (room, kind): repeated
+// pings of the same kind bump a count instead of stacking up or being dropped.
+interface OpenPing {
+  id: string;
+  roomId: string;
+  kind: StaffPingKind;
+  reason: string;
+  count: number;
+}
+const openPings = new Map<string, OpenPing>();
+const pingKey = (roomId: string, kind: StaffPingKind) => `${roomId}|${kind}`;
+
+// Core emits everything through this. staff_ping is deduplicated; the rest is
+// broadcast as-is.
+function emitForRoom(event: ServerEvent): void {
+  if (event.type !== "staff_ping") {
+    broadcast(event);
+    return;
+  }
+  const key = pingKey(event.roomId, event.kind);
+  let ping = openPings.get(key);
+  if (ping) {
+    ping.count += 1;
+    ping.reason = event.reason; // keep the latest (often-escalated) wording
+  } else {
+    ping = { id: event.id, roomId: event.roomId, kind: event.kind, reason: event.reason, count: 1 };
+    openPings.set(key, ping);
+  }
+  broadcast({ ...ping, type: "staff_ping" });
+}
+
 function pushRoomState(roomId: string): void {
   broadcast({ type: "room_state", room: rooms.view(roomId) });
 }
@@ -153,6 +185,9 @@ wss.on("connection", (socket) => {
         else if (c.action === "reset") {
           rooms.reset(event.roomId);
           runtimes.delete(event.roomId);
+          for (const [key, ping] of openPings) {
+            if (ping.roomId === event.roomId) openPings.delete(key);
+          }
         }
         pushRoomState(event.roomId);
         pushBudget(event.roomId);
@@ -167,9 +202,27 @@ wss.on("connection", (socket) => {
         return;
       }
 
-      case "staff_ack": {
-        // Relay to every console so the ping clears for all operators.
-        broadcast({ type: "staff_ack", pingId: event.pingId });
+      case "staff_respond": {
+        // "acknowledged" = on the way (ping stays open); "resolved" = handled
+        // (ping closes). Find the open ping; only delete it when resolved.
+        let target: OpenPing | undefined;
+        for (const [key, ping] of openPings) {
+          if (ping.id === event.pingId) {
+            target = ping;
+            if (event.response === "resolved") openPings.delete(key);
+            break;
+          }
+        }
+        // Feed the staff response back into Warden's context so it reflects
+        // reality instead of escalating "they asked repeatedly".
+        if (target?.kind === "human_request") {
+          const note =
+            event.response === "acknowledged"
+              ? "[STAFF UPDATE — not a player message] A human staff member has seen the players' request to speak with a person and is on their way to the room. Reassure them that help is coming; you do not need to ping staff again about this request."
+              : "[STAFF UPDATE — not a player message] A human staff member has gone to the room, spoken with the players, and resolved their request to speak with a person. That request is now fully closed. If the players ask to speak with a human again, treat it as a brand-new request (page staff again) — do NOT say someone is already on their way.";
+          runtimeFor(target.roomId).history.push({ role: "user", content: note });
+        }
+        broadcast({ type: "staff_update", pingId: event.pingId, response: event.response });
         return;
       }
 
@@ -228,7 +281,7 @@ async function handleUtterance(roomId: string, text: string): Promise<void> {
         });
       }),
     screen: (out) => screenOutgoing(out, rooms.unsolvedSolutions(roomId)),
-    emit: broadcast,
+    emit: emitForRoom,
     policy: rt.policy,
     budget: rt.budget,
   };

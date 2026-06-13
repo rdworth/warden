@@ -42,16 +42,6 @@ export async function runTool(
       }
     }
 
-    // Cooldown — don't spam staff.
-    if (tool === "ping_staff") {
-      const now = Date.now();
-      if (now - ctx.budget.lastPingAt < ctx.policy.pingCooldownMs) {
-        ctx.emit({ type: "observability", span: span.end({ status: "denied" }) });
-        return "Staff were pinged very recently; holding off on another page for now.";
-      }
-      ctx.budget.lastPingAt = now;
-    }
-
     const result = execute(ctx, tool, input);
     ctx.emit({ type: "observability", span: span.end({ status: "ok" }) });
     return result;
@@ -91,7 +81,14 @@ function execute(
     case "ping_staff": {
       const reason = String(input.reason ?? "players requested a staff member");
       ctx.actions.pingStaff(reason);
-      ctx.emit({ type: "staff_ping", id: randomUUID(), roomId: ctx.roomId, reason });
+      ctx.emit({
+        type: "staff_ping",
+        id: randomUUID(),
+        roomId: ctx.roomId,
+        kind: "human_request",
+        reason,
+        count: 1,
+      });
       return "Staff have been notified and are on their way.";
     }
     case "skip_puzzle": {

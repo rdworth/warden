@@ -4,6 +4,8 @@ import {
   Decision,
   RoomView,
   SpanRecord,
+  StaffPingKind,
+  StaffResponse,
 } from "./domain.js";
 
 export * from "./domain.js";
@@ -47,8 +49,8 @@ export const ClientEvent = z.discriminatedUnion("type", [
     responses: z.number().optional(),
     costUsd: z.number().optional(),
   }),
-  // Staff mark a "talk to a human" ping (or any alert) as handled.
-  z.object({ type: z.literal("staff_ack"), pingId: z.string() }),
+  // Staff respond to a ping: "acknowledged" (on the way) or "resolved" (handled).
+  z.object({ type: z.literal("staff_respond"), pingId: z.string(), response: StaffResponse }),
   // Cancel an in-flight Warden run.
   z.object({ type: z.literal("cancel"), runId: z.string() }),
 ]);
@@ -65,10 +67,18 @@ export const ServerEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("team_message"), roomId: z.string(), text: z.string() }),
   // A risky action (skip_puzzle / extend_timer) awaiting a human decision.
   z.object({ type: z.literal("approval_request"), request: ApprovalRequest }),
-  // Notify staff — on player request or on error/budget breach.
-  z.object({ type: z.literal("staff_ping"), id: z.string(), roomId: z.string(), reason: z.string() }),
-  // A staff ping was acknowledged (handled) — broadcast so every console clears it.
-  z.object({ type: z.literal("staff_ack"), pingId: z.string() }),
+  // Notify staff — on player request or on error/budget breach. Deduplicated
+  // per (room, kind): repeated pings bump `count` rather than stacking up.
+  z.object({
+    type: z.literal("staff_ping"),
+    id: z.string(),
+    roomId: z.string(),
+    kind: StaffPingKind,
+    reason: z.string(),
+    count: z.number(),
+  }),
+  // A staff member responded to a ping — broadcast so every console updates it.
+  z.object({ type: z.literal("staff_update"), pingId: z.string(), response: StaffResponse }),
   // One OpenTelemetry span, for the live observability panel.
   z.object({ type: z.literal("observability"), span: SpanRecord }),
   // Pushed room state (operator-safe projection).

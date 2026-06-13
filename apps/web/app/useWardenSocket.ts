@@ -8,6 +8,7 @@ import {
   type RoomControl,
   type RoomView,
   type SpanRecord,
+  type StaffResponse,
 } from "@warden/contracts";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
@@ -17,12 +18,14 @@ export interface TeamMessage {
   text: string;
   ts: number;
 }
+export type StaffPingStatus = "pending" | "acknowledged" | "resolved";
 export interface StaffPing {
   id: string;
   roomId: string;
   reason: string;
+  count: number;
   ts: number;
-  resolved: boolean;
+  status: StaffPingStatus;
 }
 export interface BudgetView {
   responsesUsed: number;
@@ -89,13 +92,27 @@ export function useWardenSocket() {
           setSpans((s) => [ev.span, ...s].slice(0, 100));
           break;
         case "staff_ping":
-          setPings((p) => [{ id: ev.id, roomId: ev.roomId, reason: ev.reason, ts: Date.now(), resolved: false }, ...p].slice(0, 50));
+          setPings((p) => {
+            const i = p.findIndex((x) => x.id === ev.id);
+            if (i >= 0) {
+              const next = [...p];
+              // Preserve status (e.g. en route) on a count bump.
+              next[i] = { ...next[i], reason: ev.reason, count: ev.count };
+              return next;
+            }
+            return [
+              { id: ev.id, roomId: ev.roomId, reason: ev.reason, count: ev.count, ts: Date.now(), status: "pending" as const },
+              ...p,
+            ].slice(0, 50);
+          });
           break;
-        case "staff_ack":
-          setPings((p) => p.map((x) => (x.id === ev.pingId ? { ...x, resolved: true } : x)));
+        case "staff_update":
+          setPings((p) =>
+            p.map((x) => (x.id === ev.pingId ? { ...x, status: ev.response } : x)),
+          );
           break;
         case "error":
-          setPings((p) => [{ id: `err-${Date.now()}`, roomId: ev.roomId ?? "?", reason: `error: ${ev.message}`, ts: Date.now(), resolved: false }, ...p].slice(0, 50));
+          setPings((p) => [{ id: `err-${Date.now()}`, roomId: ev.roomId ?? "?", reason: `error: ${ev.message}`, count: 1, ts: Date.now(), status: "pending" as const }, ...p].slice(0, 50));
           break;
       }
     };
@@ -127,8 +144,8 @@ export function useWardenSocket() {
       send({ type: "budget_topup", roomId, ...amount }),
     [send],
   );
-  const acknowledgePing = useCallback(
-    (pingId: string) => send({ type: "staff_ack", pingId }),
+  const respondToPing = useCallback(
+    (pingId: string, response: StaffResponse) => send({ type: "staff_respond", pingId, response }),
     [send],
   );
 
@@ -144,6 +161,6 @@ export function useWardenSocket() {
     decide,
     roomControl,
     topUpBudget,
-    acknowledgePing,
+    respondToPing,
   };
 }

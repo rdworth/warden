@@ -66,6 +66,17 @@ export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
 export const Decision = z.enum(["allow", "deny"]);
 export type Decision = z.infer<typeof Decision>;
 
+/** Why staff were paged — used to deduplicate pings per room. */
+export const StaffPingKind = z.enum(["human_request", "budget", "guardrail", "error"]);
+export type StaffPingKind = z.infer<typeof StaffPingKind>;
+
+/**
+ * A staff member's response to a ping. `acknowledged` = seen it, on the way (the
+ * ping stays open / en route). `resolved` = visited and handled (ping closes).
+ */
+export const StaffResponse = z.enum(["acknowledged", "resolved"]);
+export type StaffResponse = z.infer<typeof StaffResponse>;
+
 /** One OpenTelemetry span, projected for the live operator console. */
 export const SpanRecord = z.object({
   id: z.string(),

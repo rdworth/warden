@@ -19,7 +19,7 @@ function fmt(ms: number): string {
 }
 
 export default function Console() {
-  const { connected, rooms, teamMessages, approvals, spans, pings, budgets, sendUtterance, decide, roomControl, topUpBudget, acknowledgePing } =
+  const { connected, rooms, teamMessages, approvals, spans, pings, budgets, sendUtterance, decide, roomControl, topUpBudget, respondToPing } =
     useWardenSocket();
   const [input, setInput] = useState("");
   const [now, setNow] = useState(Date.now());
@@ -241,34 +241,50 @@ export default function Console() {
               </div>
             </Panel>
 
-            <Panel title={`Staff pings${pings.some((p) => !p.resolved) ? ` (${pings.filter((p) => !p.resolved).length})` : ""}`}>
+            <Panel title={`Staff pings${pings.some((p) => p.status !== "resolved") ? ` (${pings.filter((p) => p.status !== "resolved").length})` : ""}`}>
               {pings.length === 0 ? (
                 <span style={{ color: "#999", fontSize: 13 }}>None.</span>
               ) : (
                 <div style={{ display: "grid", gap: 4, fontSize: 13 }}>
-                  {pings.map((p) => (
-                    <div
-                      key={p.id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 8,
-                        opacity: p.resolved ? 0.5 : 1,
-                      }}
-                    >
-                      <span style={{ textDecoration: p.resolved ? "line-through" : "none" }}>
-                        {p.resolved ? "✅" : "🔔"} {p.reason}
-                      </span>
-                      {p.resolved ? (
-                        <span style={{ fontSize: 11, color: "#0a7", whiteSpace: "nowrap" }}>answered</span>
-                      ) : (
-                        <button onClick={() => acknowledgePing(p.id)} style={btnGhost}>
-                          Answered
-                        </button>
-                      )}
-                    </div>
-                  ))}
+                  {pings.map((p) => {
+                    const icon = p.status === "resolved" ? "✅" : p.status === "acknowledged" ? "🚶" : "🔔";
+                    return (
+                      <div
+                        key={p.id}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          opacity: p.status === "resolved" ? 0.5 : 1,
+                        }}
+                      >
+                        <span style={{ textDecoration: p.status === "resolved" ? "line-through" : "none" }}>
+                          {icon} {p.reason}
+                          {p.count > 1 && (
+                            <span style={{ marginLeft: 6, fontWeight: 700, color: "#e67e22" }}>×{p.count}</span>
+                          )}
+                          {p.status === "acknowledged" && (
+                            <span style={{ marginLeft: 6, fontSize: 11, color: "#2980b9" }}>en route</span>
+                          )}
+                        </span>
+                        <span style={{ display: "flex", gap: 6, whiteSpace: "nowrap" }}>
+                          {p.status === "pending" && (
+                            <button onClick={() => respondToPing(p.id, "acknowledged")} style={btnGhost}>
+                              On my way
+                            </button>
+                          )}
+                          {p.status !== "resolved" ? (
+                            <button onClick={() => respondToPing(p.id, "resolved")} style={btnGhost}>
+                              Resolved
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: 11, color: "#0a7" }}>resolved</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </Panel>
