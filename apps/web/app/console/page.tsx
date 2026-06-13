@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useWardenSocket } from "./useWardenSocket";
 
 const ROOM_ID = "room-1";
@@ -51,6 +51,13 @@ export default function Console() {
   const room = rooms[ROOM_ID];
   const messages = teamMessages[ROOM_ID] ?? [];
   const budget = budgets[ROOM_ID];
+
+  // Auto-scroll the room channel to the latest message.
+  const chatRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chatRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length]);
 
   const elapsed = room
     ? room.status === "running" && room.startedAt
@@ -116,7 +123,10 @@ export default function Console() {
                       display: "flex",
                       justifyContent: "space-between",
                       alignItems: "center",
-                      padding: "10px 12px",
+                      // Fixed height so the row doesn't grow when the "mark
+                      // solved" button appears once the room is running.
+                      minHeight: 48,
+                      padding: "8px 12px",
                       borderRadius: 10,
                       background: p.solved ? c.rowSolved : c.rowBg,
                       border: `1px solid ${c.rowBorder}`,
@@ -132,7 +142,7 @@ export default function Console() {
                       )}
                     </span>
                     {!p.solved && room.status === "running" && (
-                      <button onClick={() => roomControl(ROOM_ID, { action: "solve_puzzle", puzzleId: p.id })} style={btnGhost}>
+                      <button onClick={() => roomControl(ROOM_ID, { action: "solve_puzzle", puzzleId: p.id })} style={btnRow}>
                         mark solved
                       </button>
                     )}
@@ -169,7 +179,7 @@ export default function Console() {
             </Panel>
 
             <Panel title="Room channel (players ↔ Warden)">
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+              <div ref={chatRef} style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
                 {messages.length === 0 && <span style={{ color: c.muted, fontSize: 13 }}>No messages yet.</span>}
                 {messages.map((m, i) => {
                   const isPlayer = m.role === "player";
@@ -430,4 +440,6 @@ const btnGhost: React.CSSProperties = {
   font: "inherit",
 };
 const chip: React.CSSProperties = { ...btnGhost, borderRadius: 999, color: c.text };
+// Compact in-row button (minimal vertical padding) so a row keeps its height.
+const btnRow: React.CSSProperties = { ...btnGhost, padding: "2px 12px" };
 const dimmed: React.CSSProperties = { opacity: 0.4, cursor: "default" };
