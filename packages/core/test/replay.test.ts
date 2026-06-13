@@ -36,6 +36,8 @@ function makeRoom() {
     sensors: {
       snapshot: () => ({
         name: "Test Room",
+        status: "running" as const,
+        outcome: null,
         durationMs: 45 * 60_000 + extraMs,
         elapsedMs: Date.now() - startedAt,
         puzzles: puzzles.map((p) => ({

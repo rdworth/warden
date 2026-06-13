@@ -33,7 +33,13 @@ export default function Console() {
   const messages = teamMessages[ROOM_ID] ?? [];
   const budget = budgets[ROOM_ID];
 
-  const elapsed = room?.startedAt ? now - room.startedAt : 0;
+  // Tick live only while running; once ended (or pending), use the frozen
+  // server-side elapsed so the clock stops at the finish.
+  const elapsed = room
+    ? room.status === "running" && room.startedAt
+      ? now - room.startedAt
+      : room.elapsedMs
+    : 0;
 
   const metrics = useMemo(() => {
     const model = spans.filter((s) => s.kind === "model");
@@ -66,7 +72,15 @@ export default function Console() {
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16, marginTop: 16 }}>
           {/* LEFT: room + team channel + input */}
           <section>
-            <Panel title={`${room.name} — ${room.status.toUpperCase()}`}>
+            <Panel
+              title={`${room.name} — ${
+                room.status === "ended"
+                  ? room.outcome === "solved"
+                    ? "ENDED · SOLVED 🎉"
+                    : "ENDED · TIME'S UP ⏰"
+                  : room.status.toUpperCase()
+              }`}
+            >
               <div style={{ fontSize: 13, color: "#555", marginBottom: 8 }}>
                 Elapsed <b>{fmt(elapsed)}</b> of {fmt(room.durationMs)}
               </div>
@@ -99,13 +113,32 @@ export default function Console() {
                   </li>
                 ))}
               </ul>
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                 <button onClick={() => roomControl(ROOM_ID, { action: "start" })} style={btn} disabled={room.status === "running"}>
                   Start room
                 </button>
                 <button onClick={() => roomControl(ROOM_ID, { action: "reset" })} style={btnGhost}>
                   Reset
                 </button>
+                {room.status === "running" && (
+                  <>
+                    <button onClick={() => roomControl(ROOM_ID, { action: "fast_forward", minutes: 10 })} style={btnGhost}>
+                      ⏩ +10 min
+                    </button>
+                    <button
+                      onClick={() =>
+                        roomControl(ROOM_ID, {
+                          // Land precisely at ~1 minute remaining (fractional minutes OK).
+                          action: "fast_forward",
+                          minutes: Math.max(0, (room.durationMs - elapsed - 60_000) / 60_000),
+                        })
+                      }
+                      style={btnGhost}
+                    >
+                      ⏭ to ~1m left
+                    </button>
+                  </>
+                )}
               </div>
             </Panel>
 

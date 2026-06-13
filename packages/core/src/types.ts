@@ -11,6 +11,8 @@ export interface RoomSensors {
   /** Model/operator-safe snapshot — names, solved flags, SAFE hints. No solutions. */
   snapshot(): {
     name: string;
+    status: "pending" | "running" | "ended";
+    outcome: "solved" | "timed_out" | null;
     durationMs: number;
     elapsedMs: number;
     puzzles: { id: string; name: string; solved: boolean; hints: string[] }[];

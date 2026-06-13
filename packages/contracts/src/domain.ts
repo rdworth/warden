@@ -35,19 +35,27 @@ export type PuzzleView = z.infer<typeof PuzzleView>;
 export const RoomStatus = z.enum(["pending", "running", "ended"]);
 export type RoomStatus = z.infer<typeof RoomStatus>;
 
+/** How a room ended — a win (all solved) or the clock running out. */
+export const RoomOutcome = z.enum(["solved", "timed_out"]);
+export type RoomOutcome = z.infer<typeof RoomOutcome>;
+
 export const RoomSession = z.object({
   id: z.string(),
   name: z.string(),
   puzzles: z.array(Puzzle),
   /** epoch ms when the room started; null while pending. */
   startedAt: z.number().nullable(),
+  /** epoch ms when the room ended; null until then. Freezes the clock. */
+  endedAt: z.number().nullable(),
+  /** How it ended; null while pending/running. */
+  outcome: RoomOutcome.nullable(),
   durationMs: z.number(),
   status: RoomStatus,
 });
 export type RoomSession = z.infer<typeof RoomSession>;
 
 /** The operator-safe projection of a room (no unsolved-puzzle solutions). */
-export const RoomView = RoomSession.omit({ puzzles: true }).extend({
+export const RoomView = RoomSession.omit({ puzzles: true, endedAt: true }).extend({
   puzzles: z.array(PuzzleView),
   elapsedMs: z.number(),
 });

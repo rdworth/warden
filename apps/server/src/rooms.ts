@@ -23,7 +23,9 @@ export class RoomService {
 
   elapsedMs(room: RoomSession): number {
     if (room.startedAt == null) return 0;
-    return Math.max(0, Date.now() - room.startedAt);
+    // Freeze at endedAt once the room is over.
+    const end = room.endedAt ?? Date.now();
+    return Math.max(0, end - room.startedAt);
   }
 
   start(roomId: string): void {
@@ -31,6 +33,27 @@ export class RoomService {
     if (!room) return;
     room.status = "running";
     room.startedAt = Date.now();
+    room.endedAt = null;
+    room.outcome = null;
+  }
+
+  /** End a running room if its clock has run out. Returns true if it changed. */
+  private maybeExpire(room: RoomSession): boolean {
+    if (room.status !== "running" || room.startedAt == null) return false;
+    if (Date.now() - room.startedAt < room.durationMs) return false;
+    room.status = "ended";
+    room.endedAt = room.startedAt + room.durationMs;
+    room.outcome = "timed_out";
+    return true;
+  }
+
+  /** Expire any timed-out rooms; returns the ids that just ended (to broadcast). */
+  tick(): string[] {
+    const ended: string[] = [];
+    for (const [id, room] of this.rooms) {
+      if (this.maybeExpire(room)) ended.push(id);
+    }
+    return ended;
   }
 
   reset(roomId: string): void {
@@ -53,27 +76,48 @@ export class RoomService {
     room.durationMs += Math.max(0, minutes) * 60_000;
   }
 
+  /** Dev/sim only: advance the clock by moving startedAt into the past. */
+  fastForward(roomId: string, minutes: number): void {
+    const room = this.rooms.get(roomId);
+    if (!room || room.startedAt == null) return;
+    room.startedAt -= Math.max(0, minutes) * 60_000;
+  }
+
   private markSolved(roomId: string, puzzleId: string): boolean {
     const room = this.rooms.get(roomId);
     if (!room) return false;
-    const puzzle = room.puzzles.find((p) => p.id === puzzleId);
+    // Lenient match: Warden may pass the id, the display name, or a slug of it.
+    const needle = puzzleId.trim().toLowerCase();
+    const slug = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
+    const puzzle = room.puzzles.find(
+      (p) => p.id.toLowerCase() === needle || p.name.toLowerCase() === needle || slug(p.name) === needle,
+    );
     if (!puzzle || puzzle.solved) return false;
     puzzle.solved = true;
     puzzle.solvedAt = Date.now();
-    if (room.puzzles.every((p) => p.solved)) room.status = "ended";
+    if (room.puzzles.every((p) => p.solved)) {
+      room.status = "ended";
+      room.endedAt = Date.now();
+      room.outcome = "solved";
+    }
     return true;
   }
 
   /** Model/operator-safe snapshot — no unsolved-puzzle solutions. */
   snapshot(roomId: string): {
     name: string;
+    status: RoomSession["status"];
+    outcome: RoomSession["outcome"];
     durationMs: number;
     elapsedMs: number;
     puzzles: { id: string; name: string; solved: boolean; hints: string[] }[];
   } {
     const room = this.requireRoom(roomId);
+    this.maybeExpire(room);
     return {
       name: room.name,
+      status: room.status,
+      outcome: room.outcome,
       durationMs: room.durationMs,
       elapsedMs: this.elapsedMs(room),
       puzzles: room.puzzles.map((p) => ({
@@ -95,6 +139,7 @@ export class RoomService {
   /** Operator-safe view: strips solutions for unsolved puzzles, adds elapsed. */
   view(roomId: string): RoomView {
     const room = this.requireRoom(roomId);
+    this.maybeExpire(room);
     const puzzles: PuzzleView[] = room.puzzles.map((p) => ({
       id: p.id,
       name: p.name,
@@ -108,6 +153,7 @@ export class RoomService {
       id: room.id,
       name: room.name,
       status: room.status,
+      outcome: room.outcome,
       startedAt: room.startedAt,
       durationMs: room.durationMs,
       elapsedMs: this.elapsedMs(room),
@@ -129,6 +175,8 @@ const DEFAULT_ROOM: RoomSession = {
   name: "The Lighthouse",
   status: "pending",
   startedAt: null,
+  endedAt: null,
+  outcome: null,
   durationMs: 45 * 60_000,
   puzzles: [
     {

@@ -26,6 +26,8 @@ export const RoomControl = z.discriminatedUnion("action", [
   z.object({ action: z.literal("start") }),
   z.object({ action: z.literal("solve_puzzle"), puzzleId: z.string() }),
   z.object({ action: z.literal("reset") }),
+  // Dev/sim: advance the room clock by N minutes (to create time pressure).
+  z.object({ action: z.literal("fast_forward"), minutes: z.number() }),
 ]);
 export type RoomControl = z.infer<typeof RoomControl>;
 

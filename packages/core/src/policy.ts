@@ -62,16 +62,27 @@ function execute(
       const s = ctx.sensors.snapshot();
       const solved = s.puzzles.filter((p) => p.solved).length;
       const lines = s.puzzles.map((p) => {
-        if (p.solved) return `- ${p.name}: SOLVED`;
+        if (p.solved) return `- ${p.name} (id: ${p.id}): SOLVED`;
         const hints = p.hints.length
           ? `available hints: ${p.hints.map((h) => `"${h}"`).join("; ")}`
           : "no hints available";
-        return `- ${p.name}: unsolved (${hints})`;
+        return `- ${p.name} (id: ${p.id}): unsolved (${hints})`;
       });
-      return `Room "${s.name}" — ${solved}/${s.puzzles.length} puzzles solved.\n${lines.join("\n")}`;
+      const header =
+        s.status === "ended"
+          ? s.outcome === "solved"
+            ? `Room "${s.name}" — GAME OVER: the team solved all ${s.puzzles.length} puzzles and escaped.`
+            : `Room "${s.name}" — GAME OVER: time ran out with ${solved}/${s.puzzles.length} solved.`
+          : `Room "${s.name}" — ${solved}/${s.puzzles.length} puzzles solved.`;
+      return `${header}\n${lines.join("\n")}`;
     }
     case "get_elapsed_time": {
       const s = ctx.sensors.snapshot();
+      if (s.status === "ended") {
+        return s.outcome === "solved"
+          ? "THE GAME IS OVER — the team solved every puzzle and escaped."
+          : "THE GAME IS OVER — time has run out and the room has ended.";
+      }
       const m = Math.floor(s.elapsedMs / 60000);
       const sec = Math.floor((s.elapsedMs % 60000) / 1000);
       const total = Math.floor(s.durationMs / 60000);

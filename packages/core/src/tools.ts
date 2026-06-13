@@ -34,7 +34,7 @@ export function makeTools(ctx: RunContext) {
       description:
         "Skip a puzzle (mark it solved) so the team can move on. RISKY: requires human Game Master approval before it takes effect.",
       inputSchema: z.object({
-        puzzleId: z.string().describe("The id of the puzzle to skip."),
+        puzzleId: z.string().describe("The puzzle's id, exactly as shown by get_room_state (e.g. \"p3\")."),
         reason: z.string().describe("Why skipping is warranted."),
       }),
       execute: async (input) => runTool(ctx, "skip_puzzle", input),

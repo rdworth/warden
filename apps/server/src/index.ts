@@ -182,6 +182,7 @@ wss.on("connection", (socket) => {
         const c = event.control;
         if (c.action === "start") rooms.start(event.roomId);
         else if (c.action === "solve_puzzle") rooms.solvePuzzle(event.roomId, c.puzzleId);
+        else if (c.action === "fast_forward") rooms.fastForward(event.roomId, c.minutes);
         else if (c.action === "reset") {
           rooms.reset(event.roomId);
           runtimes.delete(event.roomId);
@@ -295,6 +296,11 @@ async function handleUtterance(roomId: string, text: string): Promise<void> {
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[server] http+ws (game master) listening on 0.0.0.0:${PORT}`);
 });
+
+// End rooms whose clock has run out and push the frozen state to consoles.
+setInterval(() => {
+  for (const roomId of rooms.tick()) pushRoomState(roomId);
+}, 1000).unref();
 
 const shutdown = (signal: string) => {
   console.log(`[server] received ${signal}, shutting down`);
