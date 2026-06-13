@@ -83,11 +83,18 @@ function execute(
           ? "THE GAME IS OVER — the team solved every puzzle and escaped."
           : "THE GAME IS OVER — time has run out and the room has ended.";
       }
-      const m = Math.floor(s.elapsedMs / 60000);
-      const sec = Math.floor((s.elapsedMs % 60000) / 1000);
+      const fmt = (ms: number) => {
+        const m = Math.floor(ms / 60000);
+        const sec = Math.floor((ms % 60000) / 1000);
+        return m > 0 ? `${m} min ${sec} sec` : `${sec} sec`;
+      };
+      const remainingMs = Math.max(0, s.durationMs - s.elapsedMs);
       const total = Math.floor(s.durationMs / 60000);
-      const remaining = Math.max(0, Math.floor((s.durationMs - s.elapsedMs) / 60000));
-      return `${m}m ${sec}s elapsed of a ${total}m limit (~${remaining}m remaining).`;
+      return (
+        `The room is STILL RUNNING — the game is NOT over. ` +
+        `Time REMAINING before it ends: ${fmt(remainingMs)}. ` +
+        `Time already elapsed: ${fmt(s.elapsedMs)} (of a ${total} min limit).`
+      );
     }
     case "ping_staff": {
       const reason = String(input.reason ?? "players requested a staff member");
