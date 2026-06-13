@@ -56,7 +56,7 @@ export default function Console() {
   const chatRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = chatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages.length]);
 
   const elapsed = room
