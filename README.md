@@ -35,14 +35,15 @@ pnpm dev                                      # runs web + server together
 ```
 
 - Web: http://localhost:3000
-- Server (WebSocket): ws://localhost:8080
+- Server: ws://localhost:8080 (WebSocket) — also serves HTTP `GET /` → 200,
+  used as the deploy health check.
 
 The web app defaults to `ws://localhost:8080`; override with
 `NEXT_PUBLIC_WS_URL`.
 
 > The server reads `ANTHROPIC_API_KEY` (and optional `MODEL`) from the
-> environment. For `pnpm dev`, export it or use a process manager that loads
-> `.env` — Node doesn't load `.env` automatically.
+> environment, and auto-loads the repo-root `.env` on startup. Real environment
+> variables (e.g. on Railway) take precedence and are not overridden.
 
 ## Deploying to Railway (both services)
 
@@ -55,7 +56,8 @@ repo with **Root Directory = `/`**:
 - Config-as-code path: `apps/server/railway.json` (or set Builder = Dockerfile,
   Dockerfile Path = `apps/server/Dockerfile` in the dashboard).
 - Variables: `ANTHROPIC_API_KEY` (required), `MODEL` (optional).
-- Generate a public domain → this is your `wss://…` URL.
+- Generate a public domain → this is your `wss://…` URL. Opening it over
+  HTTPS in a browser returns `warden agent server: ok` (the health check).
 
 ### 2. `web` service
 - Config-as-code path: `apps/web/railway.json`.
